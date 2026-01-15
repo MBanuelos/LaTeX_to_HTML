@@ -1,0 +1,51 @@
+---
+title: "Document"
+---
+
+\maketitle
+
+# Introduction
+
+This document tests the enhanced LaTeX to HTML converter with theorem
+environments.
+
+THEOREM_START_DEFINITION_Definition_THEOREM_START
+
+A vector is an element of a vector space.
+
+THEOREM_END_DEFINITION_THEOREM_END
+
+THEOREM_START_THEOREM_Theorem_THEOREM_START
+
+In a right triangle with legs of length $a$ and $b$, and hypotenuse of
+length $c$, we have: $$a^2 + b^2 = c^2$$
+
+THEOREM_END_THEOREM_THEOREM_END
+
+THEOREM_START_PROOF_Proof_THEOREM_START
+
+This follows from the law of cosines when the angle is $90°$.
+
+THEOREM_END_PROOF_THEOREM_END
+
+THEOREM_START_LEMMA_Lemma_THEOREM_START
+
+Every finite set has a maximum element.
+
+THEOREM_END_LEMMA_THEOREM_END
+
+THEOREM_START_EXAMPLE_Example_THEOREM_START
+
+Consider the set $\{1, 3, 7, 2\}$. The maximum element is $7$.
+
+THEOREM_END_EXAMPLE_THEOREM_END
+
+# References
+
+We can reference Definition *def:vector* and Theorem *thm:pythagorean*.
+
+THEOREM_START_EXERCISE_Exercise_THEOREM_START
+
+Prove that the sum of two even numbers is even.
+
+THEOREM_END_EXERCISE_THEOREM_END
