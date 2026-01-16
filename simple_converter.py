@@ -10,11 +10,11 @@ import tempfile
 
 def preprocess_latex_simple(content):
     """Simple but effective LaTeX preprocessing"""
-    
+
     # Theorem environment mappings
     theorem_envs = {
         'definition': 'Definition',
-        'theorem': 'Theorem', 
+        'theorem': 'Theorem',
         'lemma': 'Lemma',
         'corollary': 'Corollary',
         'proposition': 'Proposition',
@@ -23,24 +23,24 @@ def preprocess_latex_simple(content):
         'exercise': 'Exercise',
         'proof': 'Proof'
     }
-    
-    # Process theorem environments
+
+    # Process theorem environments with blockquote wrappers
     for env_name, display_name in theorem_envs.items():
-        # Replace begin/end with custom markup that pandoc will preserve
-        begin_pattern = rf'\\begin\{{{env_name}\}}'
+        begin_pattern = rf'\\begin\{{{env_name}\}}(?:\[(?P<title>[^\]]+)\])?'
         end_pattern = rf'\\end\{{{env_name}\}}'
-        
-        # Handle labels
+
         def replace_begin(match):
-            return f'\\textbf{{{display_name}:}} '
-        
+            title = match.group('title')
+            title_suffix = f" ({title})" if title else ""
+            return f'\\begin{{quote}}\n\\textbf{{{display_name}{title_suffix}:}} '
+
         content = re.sub(begin_pattern, replace_begin, content)
-        content = re.sub(end_pattern, '', content)
-    
+        content = re.sub(end_pattern, '\\n\\\\end{quote}\\n', content)
+
     # Handle labels and references better
     content = re.sub(r'\\label\{([^}]+)\}', r'', content)  # Remove labels for now
     content = re.sub(r'\\ref\{([^}]+)\}', r'\\textit{\\1}', content)  # Convert refs to italic
-    
+
     return content
 
 def convert_latex_simple(input_file, output_file):
@@ -106,15 +106,7 @@ body {
 }
 
 /* Theorem-like environments */
-p:has(strong:contains("Definition:")),
-p:has(strong:contains("Theorem:")),
-p:has(strong:contains("Lemma:")),
-p:has(strong:contains("Corollary:")),
-p:has(strong:contains("Proposition:")),
-p:has(strong:contains("Remark:")),
-p:has(strong:contains("Example:")),
-p:has(strong:contains("Exercise:")),
-p:has(strong:contains("Proof:")) {
+.theorem-block {
     margin: 1.5em 0;
     padding: 1em;
     border-left: 4px solid #007acc;
@@ -122,27 +114,35 @@ p:has(strong:contains("Proof:")) {
     border-radius: 4px;
 }
 
+.theorem-block > p:first-child {
+    margin-top: 0;
+}
+
+.theorem-block > p:last-child {
+    margin-bottom: 0;
+}
+
 /* Specific colors for different types */
-p:has(strong:contains("Definition:")) {
+.theorem-block[data-theorem="definition"] {
     border-left-color: #dc3545;
     background-color: #fff8f8;
 }
 
-p:has(strong:contains("Theorem:")),
-p:has(strong:contains("Lemma:")),
-p:has(strong:contains("Corollary:")),
-p:has(strong:contains("Proposition:")) {
+.theorem-block[data-theorem="theorem"],
+.theorem-block[data-theorem="lemma"],
+.theorem-block[data-theorem="corollary"],
+.theorem-block[data-theorem="proposition"] {
     border-left-color: #28a745;
     background-color: #f8fff8;
 }
 
-p:has(strong:contains("Example:")),
-p:has(strong:contains("Exercise:")) {
+.theorem-block[data-theorem="example"],
+.theorem-block[data-theorem="exercise"] {
     border-left-color: #ffc107;
     background-color: #fffdf0;
 }
 
-p:has(strong:contains("Proof:")) {
+.theorem-block[data-theorem="proof"] {
     border-left-color: #6c757d;
     background-color: #f1f3f4;
 }
@@ -157,6 +157,16 @@ p:has(strong:contains("Proof:")) {
 </style>
 """
     
+    # Add theorem classes to blockquotes
+    theorem_keywords = ['Definition:', 'Theorem:', 'Lemma:', 'Corollary:', 'Proposition:', 'Remark:', 'Example:', 'Exercise:', 'Proof:']
+    for keyword in theorem_keywords:
+        env_name = keyword.lower().replace(':', '')
+        pattern = re.compile(rf'<blockquote>(\s*<p>\s*<strong>{re.escape(keyword)}</strong>)')
+        content = pattern.sub(
+            rf'<blockquote class="theorem-block" data-theorem="{env_name}">\1',
+            content
+        )
+
     # Insert CSS before closing head tag
     if '</head>' in content:
         content = content.replace('</head>', custom_css + '</head>')

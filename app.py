@@ -23,11 +23,11 @@ def allowed_file(filename):
 
 def preprocess_latex(latex_content):
     """Simple but effective LaTeX preprocessing for theorem environments"""
-    
+
     # Theorem environment mappings
     theorem_envs = {
         'definition': 'Definition',
-        'theorem': 'Theorem', 
+        'theorem': 'Theorem',
         'lemma': 'Lemma',
         'corollary': 'Corollary',
         'proposition': 'Proposition',
@@ -36,21 +36,24 @@ def preprocess_latex(latex_content):
         'exercise': 'Exercise',
         'proof': 'Proof'
     }
-    
-    # Process theorem environments with simple replacement
+
+    # Process theorem environments with blockquote wrappers
     for env_name, display_name in theorem_envs.items():
-        # Simple pattern matching for begin/end
-        begin_pattern = rf'\\begin\{{{env_name}\}}'
+        begin_pattern = rf'\\begin\{{{env_name}\}}(?:\[(?P<title>[^\]]+)\])?'
         end_pattern = rf'\\end\{{{env_name}\}}'
-        
-        # Replace with bold text that will be styled with CSS
-        latex_content = re.sub(begin_pattern, f'\n\n<strong>{display_name}:</strong> ', latex_content)
-        latex_content = re.sub(end_pattern, '\n', latex_content)
-    
+
+        def replace_begin(match):
+            title = match.group('title')
+            title_suffix = f" ({title})" if title else ""
+            return f'\\begin{{quote}}\n\\textbf{{{display_name}{title_suffix}:}} '
+
+        latex_content = re.sub(begin_pattern, replace_begin, latex_content)
+        latex_content = re.sub(end_pattern, '\n\\\\end{quote}\n', latex_content)
+
     # Handle labels and references
     latex_content = re.sub(r'\\label\{([^}]+)\}', r'', latex_content)  # Remove labels
     latex_content = re.sub(r'\\ref\{([^}]+)\}', r'\\textit{\1}', latex_content)  # Convert refs to italic
-    
+
     return latex_content
 
 def resolve_includes(latex_content, base_dir):
@@ -190,6 +193,10 @@ format:
                     shutil.copytree(src, dst, dirs_exist_ok=True)
                 else:
                     shutil.copy2(src, dst)
+        for root, _, files in os.walk(output_dir):
+            for filename in files:
+                if filename.endswith('.html'):
+                    enhance_html_accessibility(os.path.join(root, filename))
         return True
     except subprocess.CalledProcessError as e:
         raise Exception(f"Quarto render failed: {e.stderr}")
@@ -245,6 +252,8 @@ def convert_latex_to_html(latex_file_path, output_path):
             # Clean up temp file
             if os.path.exists(temp_tex):
                 os.remove(temp_tex)
+
+            enhance_html_accessibility(output_path)
             
             return True
             
@@ -302,6 +311,12 @@ def enhance_html_accessibility(html_path):
             pattern2 = f'<strong>{keyword}</strong>'
             replacement2 = f'<strong class="theorem-label">{keyword}</strong>'
             content = content.replace(pattern2, replacement2)
+            # Add theorem classes to blockquotes
+            blockquote_pattern = re.compile(rf'<blockquote>(\s*<p>\s*<strong>{re.escape(keyword)}</strong>)')
+            content = blockquote_pattern.sub(
+                rf'<blockquote class="theorem-block" data-theorem="{env_name}">\1',
+                content
+            )
         
         # Enhanced accessibility CSS with theorem support
         accessibility_css = """
@@ -339,8 +354,8 @@ p[data-theorem] {
     border-radius: 4px;
 }
 
-/* Also style paragraphs that start with strong theorem labels */
-p:has(> strong.theorem-label:first-child) {
+/* Theorem blockquotes */
+.theorem-block {
     margin: 1.5em 0;
     padding: 1em;
     border-left: 4px solid #007acc;
@@ -348,8 +363,17 @@ p:has(> strong.theorem-label:first-child) {
     border-radius: 4px;
 }
 
+.theorem-block > p:first-child {
+    margin-top: 0;
+}
+
+.theorem-block > p:last-child {
+    margin-bottom: 0;
+}
+
 /* Specific styling based on content */
-p[data-theorem="definition"] {
+p[data-theorem="definition"],
+.theorem-block[data-theorem="definition"] {
     border-left-color: #dc3545;
     background-color: #fff8f8;
 }
@@ -357,18 +381,25 @@ p[data-theorem="definition"] {
 p[data-theorem="theorem"],
 p[data-theorem="lemma"],
 p[data-theorem="corollary"],
-p[data-theorem="proposition"] {
+p[data-theorem="proposition"],
+.theorem-block[data-theorem="theorem"],
+.theorem-block[data-theorem="lemma"],
+.theorem-block[data-theorem="corollary"],
+.theorem-block[data-theorem="proposition"] {
     border-left-color: #28a745;
     background-color: #f8fff8;
 }
 
 p[data-theorem="example"],
-p[data-theorem="exercise"] {
+p[data-theorem="exercise"],
+.theorem-block[data-theorem="example"],
+.theorem-block[data-theorem="exercise"] {
     border-left-color: #ffc107;
     background-color: #fffdf0;
 }
 
-p[data-theorem="proof"] {
+p[data-theorem="proof"],
+.theorem-block[data-theorem="proof"] {
     border-left-color: #6c757d;
     background-color: #f1f3f4;
 }
@@ -467,7 +498,6 @@ def process_latex_zip(zip_path):
             try:
                 convert_latex_to_html(latex_file, html_path)
                 if os.path.exists(html_path):
-                    enhance_html_accessibility(html_path)
                     print(f"Successfully converted: {base_name}.html")
                 else:
                     print(f"Warning: {base_name}.html was not created at {html_path}")
