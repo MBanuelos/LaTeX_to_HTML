@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="container">
+    <div class="alert alert-success" role="alert">
+        <h2>Conversion Successful!</h2>
+        <p>Your LaTeX documents have been converted to accessible HTML.</p>
+    </div>
+    
+    <h3>Generated Files</h3>
+    <p>Your converted HTML files are available in the output directory: <code>{{ output_dir }}</code></p>
+    
+    <div style="margin: 20px 0;">
+        <a href="/download/{{ output_dir }}.zip" class="button" style="display: inline-block; text-decoration: none;">
+            Download All Files
+        </a>
+    </div>
+    
+    <p><a href="/">Convert Another File</a></p>
+    
+    <div class="features">
+        <h3>What's Been Done</h3>
+        <ul>
+            <li>LaTeX markup converted to semantic HTML5</li>
+            <li>Mathematical expressions rendered with MathJax for screen readers</li>
+            <li>Proper heading hierarchy maintained</li>
+            <li>Accessibility CSS added for better readability</li>
+            <li>Language attributes set for screen readers</li>
+        </ul>
+    </div>
+</div>
+{% endblock %}
