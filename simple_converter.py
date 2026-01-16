@@ -24,18 +24,66 @@ def preprocess_latex_simple(content):
         'proof': 'Proof'
     }
 
-    # Process theorem environments with blockquote wrappers
-    for env_name, display_name in theorem_envs.items():
-        begin_pattern = rf'\\begin\{{{env_name}\}}(?:\[(?P<title>[^\]]+)\])?'
-        end_pattern = rf'\\end\{{{env_name}\}}'
+    def extract_title_info(text):
+        title_match = re.search(r'\\title\{([^}]*)\}', text)
+        author_match = re.search(r'\\author\{([^}]*)\}', text)
+        date_match = re.search(r'\\date\{([^}]*)\}', text)
 
-        def replace_begin(match):
-            title = match.group('title')
-            title_suffix = f" ({title})" if title else ""
-            return f'\\begin{{quote}}\n\\textbf{{{display_name}{title_suffix}:}} '
+        title = title_match.group(1).strip() if title_match else ''
+        author = author_match.group(1).strip() if author_match else ''
+        date = date_match.group(1).strip() if date_match else ''
+        return title, author, date
 
-        content = re.sub(begin_pattern, replace_begin, content)
-        content = re.sub(end_pattern, '\\n\\\\end{quote}\\n', content)
+    def build_title_block(title, author, date):
+        if not title and not author and not date:
+            return None
+
+        lines = [r'\begin{center}']
+        if title:
+            lines.append(r'{\LARGE ' + title + r'\par}')
+        if author:
+            lines.append(r'\vspace{0.5em}')
+            lines.append(r'{\large ' + author + r'\par}')
+        if date:
+            lines.append(r'\vspace{0.5em}')
+            lines.append(r'{\large ' + date + r'\par}')
+        lines.append(r'\end{center}')
+        return '\n'.join(lines)
+
+    def split_comment(line):
+        match = re.search(r'(?<!\\)%', line)
+        if match:
+            return line[:match.start()], line[match.start():]
+        return line, ''
+
+    title, author, date = extract_title_info(content)
+    title_block = build_title_block(title, author, date)
+    if title_block:
+        if r'\maketitle' in content:
+            content = content.replace(r'\maketitle', title_block)
+        elif r'\begin{document}' in content:
+            content = content.replace(r'\begin{document}', r'\begin{document}' + '\n' + title_block, 1)
+        else:
+            content = title_block + '\n' + content
+
+    # Process theorem environments with blockquote wrappers, skipping comments
+    lines = content.split('\n')
+    updated_lines = []
+    for line in lines:
+        code, comment = split_comment(line)
+        for env_name, display_name in theorem_envs.items():
+            begin_pattern = rf'\\begin\{{{env_name}\}}(?:\[(?P<title>[^\]]+)\])?'
+            end_pattern = rf'\\end\{{{env_name}\}}'
+
+            def replace_begin(match):
+                title = match.group('title')
+                title_suffix = f" ({title})" if title else ""
+                return f'\\begin{{quote}}\n\\textbf{{{display_name}{title_suffix}:}} '
+
+            code = re.sub(begin_pattern, replace_begin, code)
+            code = re.sub(end_pattern, r'\\end{quote}', code)
+        updated_lines.append(code + comment)
+    content = '\n'.join(updated_lines)
 
     # Handle labels and references better
     content = re.sub(r'\\label\{([^}]+)\}', r'', content)  # Remove labels for now
@@ -100,8 +148,8 @@ def post_process_html(html_file):
 body { 
     font-family: 'Times New Roman', serif; 
     line-height: 1.6; 
-    max-width: 800px; 
-    margin: 0 auto; 
+    max-width: 1200px; 
+    margin: 0 6vw 0 2vw; 
     padding: 20px; 
 }
 
@@ -172,8 +220,7 @@ body {
         content = content.replace('</head>', custom_css + '</head>')
     
     # Add lang attribute if missing
-    if 'lang=' not in content:
-        content = content.replace('<html', '<html lang="en"')
+    content = re.sub(r'<html(?![^>]*\blang=)([^>]*)>', r'<html\1 lang="en">', content, count=1)
     
     with open(html_file, 'w', encoding='utf-8') as f:
         f.write(content)

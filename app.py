@@ -8,7 +8,7 @@ import re
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-change-this'
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'change-me')
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
 UPLOAD_FOLDER = 'uploads'
@@ -20,6 +20,32 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def extract_title_info(content):
+    title_match = re.search(r'\\title\{([^}]*)\}', content)
+    author_match = re.search(r'\\author\{([^}]*)\}', content)
+    date_match = re.search(r'\\date\{([^}]*)\}', content)
+
+    title = title_match.group(1).strip() if title_match else ''
+    author = author_match.group(1).strip() if author_match else ''
+    date = date_match.group(1).strip() if date_match else ''
+    return title, author, date
+
+def build_title_block(title, author, date):
+    if not title and not author and not date:
+        return None
+
+    lines = [r'\begin{center}']
+    if title:
+        lines.append(r'{\LARGE ' + title + r'\par}')
+    if author:
+        lines.append(r'\vspace{0.5em}')
+        lines.append(r'{\large ' + author + r'\par}')
+    if date:
+        lines.append(r'\vspace{0.5em}')
+        lines.append(r'{\large ' + date + r'\par}')
+    lines.append(r'\end{center}')
+    return '\n'.join(lines)
 
 def preprocess_latex(latex_content):
     """Simple but effective LaTeX preprocessing for theorem environments"""
@@ -37,18 +63,41 @@ def preprocess_latex(latex_content):
         'proof': 'Proof'
     }
 
-    # Process theorem environments with blockquote wrappers
-    for env_name, display_name in theorem_envs.items():
-        begin_pattern = rf'\\begin\{{{env_name}\}}(?:\[(?P<title>[^\]]+)\])?'
-        end_pattern = rf'\\end\{{{env_name}\}}'
+    title, author, date = extract_title_info(latex_content)
+    title_block = build_title_block(title, author, date)
 
-        def replace_begin(match):
-            title = match.group('title')
-            title_suffix = f" ({title})" if title else ""
-            return f'\\begin{{quote}}\n\\textbf{{{display_name}{title_suffix}:}} '
+    def split_comment(line):
+        match = re.search(r'(?<!\\)%', line)
+        if match:
+            return line[:match.start()], line[match.start():]
+        return line, ''
 
-        latex_content = re.sub(begin_pattern, replace_begin, latex_content)
-        latex_content = re.sub(end_pattern, '\n\\\\end{quote}\n', latex_content)
+    if title_block:
+        if r'\maketitle' in latex_content:
+            latex_content = latex_content.replace(r'\maketitle', title_block)
+        elif r'\begin{document}' in latex_content:
+            latex_content = latex_content.replace(r'\begin{document}', r'\begin{document}' + '\n' + title_block, 1)
+        else:
+            latex_content = title_block + '\n' + latex_content
+
+    # Process theorem environments with blockquote wrappers, skipping comments
+    lines = latex_content.split('\n')
+    updated_lines = []
+    for line in lines:
+        code, comment = split_comment(line)
+        for env_name, display_name in theorem_envs.items():
+            begin_pattern = rf'\\begin\{{{env_name}\}}(?:\[(?P<title>[^\]]+)\])?'
+            end_pattern = rf'\\end\{{{env_name}\}}'
+
+            def replace_begin(match):
+                title = match.group('title')
+                title_suffix = f" ({title})" if title else ""
+                return f'\\begin{{quote}}\n\\textbf{{{display_name}{title_suffix}:}} '
+
+            code = re.sub(begin_pattern, replace_begin, code)
+            code = re.sub(end_pattern, r'\\end{quote}', code)
+        updated_lines.append(code + comment)
+    latex_content = '\n'.join(updated_lines)
 
     # Handle labels and references
     latex_content = re.sub(r'\\label\{([^}]+)\}', r'', latex_content)  # Remove labels
@@ -78,7 +127,7 @@ def resolve_includes(latex_content, base_dir):
                 with open(include_path, 'r', encoding='utf-8', errors='ignore') as f:
                     included_content = f.read()
                 # Recursively resolve includes in the included file
-                included_content = resolve_includes(included_content, base_dir)
+                included_content = resolve_includes(included_content, os.path.dirname(include_path))
                 resolved_lines.append(included_content)
             else:
                 print(f"Warning: Could not find include file: {filename}")
@@ -98,48 +147,20 @@ def create_quarto_website(latex_file_path, output_dir):
     
     resolved_content = resolve_includes(latex_content, work_dir)
     processed_content = preprocess_latex(resolved_content)
+    title, _, _ = extract_title_info(resolved_content)
+    site_title = title if title else "LaTeX Document"
     
-    # Find chapters and sections for sidebar
-    sidebar_items = []
-    for line in processed_content.split('\n'):
-        chapter_match = re.search(r'\\chapter\{([^}]+)\}', line)
-        section_match = re.search(r'\\section\{([^}]+)\}', line)
-        
-        if chapter_match:
-            title = chapter_match.group(1)
-            # Clean title for YAML compatibility
-            title = title.replace('$', '').replace('\\', '').replace('^', '').replace('_', '')
-            sidebar_items.append({'text': title, 'level': 'chapter'})
-        elif section_match:
-            title = section_match.group(1)
-            # Clean title for YAML compatibility  
-            title = title.replace('$', '').replace('\\', '').replace('^', '').replace('_', '')
-            sidebar_items.append({'text': title, 'level': 'section'})
-    
-    # Create _quarto.yml with left sidebar
-    if sidebar_items:
-        sidebar_content = '\n'.join([
-            f'      - text: "{item["text"]}"'
-            for item in sidebar_items
-        ])
-    else:
-        sidebar_content = '      - index.qmd'
-    
+    # Create _quarto.yml without left sidebar
     quarto_config = f"""project:
   type: website
 
 website:
-  title: "LaTeX Document"
-  search:
-    location: sidebar
-    type: textbox
-  sidebar:
-    style: "floating"
-    search: true
+  title: "{site_title}"
 
 format:
   html:
     theme: cosmo
+    css: styles.css
     toc: true
     toc-location: right
     number-sections: true
@@ -148,6 +169,15 @@ format:
     
     with open(os.path.join(work_dir, '_quarto.yml'), 'w') as f:
         f.write(quarto_config)
+
+    styles_css = """
+/* Wider content with extra spacing before TOC */
+.page-columns { column-gap: 3rem; }
+.content { max-width: 1200px; margin-left: 2vw; }
+nav#TOC { margin-left: 1rem; }
+"""
+    with open(os.path.join(work_dir, 'styles.css'), 'w', encoding='utf-8') as f:
+        f.write(styles_css)
     
     # Convert LaTeX to markdown using pandoc
     temp_tex = os.path.join(work_dir, 'temp_full.tex')
@@ -172,7 +202,7 @@ format:
     
     # Create index.qmd with converted content
     with open(os.path.join(work_dir, 'index.qmd'), 'w') as f:
-        f.write(f'---\ntitle: "Document"\n---\n\n{markdown_content}')
+        f.write(f'---\ntitle: "{site_title}"\n---\n\n{markdown_content}')
     
     # Clean up temp files
     for temp_file in [temp_tex, temp_md]:
@@ -185,18 +215,31 @@ format:
         
         # Copy _site contents to output directory
         site_dir = os.path.join(work_dir, '_site')
-        if os.path.exists(site_dir):
-            for item in os.listdir(site_dir):
-                src = os.path.join(site_dir, item)
-                dst = os.path.join(output_dir, item)
-                if os.path.isdir(src):
-                    shutil.copytree(src, dst, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(src, dst)
+        if not os.path.exists(site_dir):
+            raise Exception("Quarto output directory was not created.")
+
+        for item in os.listdir(site_dir):
+            src = os.path.join(site_dir, item)
+            dst = os.path.join(output_dir, item)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+
+        index_path = os.path.join(output_dir, 'index.html')
+        base_name = os.path.splitext(os.path.basename(latex_file_path))[0]
+        named_path = os.path.join(output_dir, f"{base_name}.html")
+        if os.path.exists(index_path) and not os.path.exists(named_path):
+            shutil.copy2(index_path, named_path)
+
+        html_found = False
         for root, _, files in os.walk(output_dir):
             for filename in files:
                 if filename.endswith('.html'):
+                    html_found = True
                     enhance_html_accessibility(os.path.join(root, filename))
+        if not html_found:
+            raise Exception("No HTML files were generated by Quarto.")
         return True
     except subprocess.CalledProcessError as e:
         raise Exception(f"Quarto render failed: {e.stderr}")
@@ -222,18 +265,11 @@ def convert_latex_to_html(latex_file_path, output_path):
         if validation_errors:
             print(f"Warning: LaTeX validation issues found: {'; '.join(validation_errors)}")
         
-        if re.search(r'\\(?:include|input|chapter|section)\{[^}]+\}', content):
-            # Create Quarto website with sidebar
-            return create_quarto_website(latex_file_path, output_dir)
-        else:
-            # Single file conversion with preprocessing
-            processed_content = preprocess_latex(content)
-            
-            # Write preprocessed content to temp file
+        def convert_with_pandoc(processed_content):
             temp_tex = os.path.join(work_dir, 'temp_processed.tex')
             with open(temp_tex, 'w', encoding='utf-8') as f:
                 f.write(processed_content)
-            
+
             pandoc_cmd = [
                 'pandoc', temp_tex,
                 '--from=latex',
@@ -242,20 +278,30 @@ def convert_latex_to_html(latex_file_path, output_path):
                 '--mathjax',
                 '--output=' + output_path
             ]
-            
+
             result = subprocess.run(pandoc_cmd, capture_output=True, text=True)
-            
+
             if result.returncode != 0:
                 error_msg = f"Pandoc conversion failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
                 raise Exception(error_msg)
-            
-            # Clean up temp file
+
             if os.path.exists(temp_tex):
                 os.remove(temp_tex)
 
             enhance_html_accessibility(output_path)
-            
             return True
+
+        if re.search(r'\\(?:include|input|chapter|section)\{[^}]+\}', content):
+            try:
+                return create_quarto_website(latex_file_path, output_dir)
+            except Exception as e:
+                print(f"Warning: Quarto render failed, falling back to single HTML: {e}")
+                resolved_content = resolve_includes(content, work_dir)
+                processed_content = preprocess_latex(resolved_content)
+                return convert_with_pandoc(processed_content)
+        else:
+            processed_content = preprocess_latex(content)
+            return convert_with_pandoc(processed_content)
             
     except FileNotFoundError as e:
         raise Exception(f"File error: {str(e)}")
@@ -322,7 +368,7 @@ def enhance_html_accessibility(html_path):
         accessibility_css = """
 <style>
 /* Accessibility enhancements */
-body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; }
+body { font-family: Arial, sans-serif; line-height: 1.6; max-width: 1200px; margin: 0 6vw 0 2vw; padding: 20px; }
 h1, h2, h3, h4, h5, h6 { margin-top: 1.5em; margin-bottom: 0.5em; }
 p { margin-bottom: 1em; }
 img { max-width: 100%; height: auto; }
@@ -414,8 +460,7 @@ p[data-theorem="proof"],
             content = '<head>' + accessibility_css + '</head>' + content
         
         # Add lang attribute if missing
-        if 'lang=' not in content:
-            content = content.replace('<html>', '<html lang="en">')
+        content = re.sub(r'<html(?![^>]*\blang=)([^>]*)>', r'<html\1 lang="en">', content, count=1)
         
         with open(html_path, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -491,6 +536,8 @@ def process_latex_zip(zip_path):
         os.makedirs(output_dir, exist_ok=True)
         
         # Convert each LaTeX file
+        successes = 0
+        errors = []
         for latex_file in latex_files:
             base_name = os.path.splitext(os.path.basename(latex_file))[0]
             html_path = os.path.join(output_dir, f"{base_name}.html")
@@ -499,11 +546,20 @@ def process_latex_zip(zip_path):
                 convert_latex_to_html(latex_file, html_path)
                 if os.path.exists(html_path):
                     print(f"Successfully converted: {base_name}.html")
+                    successes += 1
                 else:
-                    print(f"Warning: {base_name}.html was not created at {html_path}")
+                    message = f"{base_name}.html was not created at {html_path}"
+                    print(f"Warning: {message}")
+                    errors.append(message)
             except Exception as e:
-                print(f"Error converting {latex_file}: {e}")
+                message = f"Error converting {latex_file}: {e}"
+                print(message)
+                errors.append(message)
                 continue
+
+        if successes == 0:
+            detail = "; ".join(errors[:3])
+            raise Exception(f"No files were converted successfully. {detail}")
         
         return output_name
 
@@ -558,4 +614,6 @@ def download_file(filename):
         return redirect(url_for('index'))
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=8000)
+    debug = os.environ.get('FLASK_DEBUG', '').lower() in ('1', 'true', 'yes')
+    port = int(os.environ.get('PORT', '8000'))
+    app.run(debug=debug, host='0.0.0.0', port=port)

@@ -1,11 +1,13 @@
 # LaTeX to Accessible HTML Converter
 
-A web application that converts LaTeX documents to accessible HTML using Quarto with proper semantic structure and screen reader compatibility.
+A web application that converts LaTeX documents to accessible HTML using Quarto (with a Pandoc fallback) and adds accessibility-focused structure and styling.
 
 ## Features
 
 - Upload ZIP files containing LaTeX documents
 - Converts .tex files to accessible HTML5
+- Preserves a named HTML file (same base name as the input) for Quarto outputs
+- Falls back to single-file Pandoc conversion if Quarto render fails
 - Adds semantic structure and ARIA labels
 - MathJax integration for mathematical expressions
 - Responsive design with accessibility considerations
@@ -14,7 +16,7 @@ A web application that converts LaTeX documents to accessible HTML using Quarto 
 ## Requirements
 
 - Python 3.7+
-- Quarto (for LaTeX conversion)
+- Quarto (for multi-page site conversion)
 - Flask
 
 ## Installation
@@ -35,14 +37,34 @@ A web application that converts LaTeX documents to accessible HTML using Quarto 
 
 1. Start the application:
    ```bash
-   python app.py
+   ./run.sh
    ```
 
-2. Open http://localhost:5000 in your browser
+2. Open http://localhost:8000 in your browser
 
 3. Upload a ZIP file containing your LaTeX documents
 
 4. Download the converted accessible HTML files
+
+### Windows
+
+1. Start the application:
+   ```bat
+   run.bat
+   ```
+
+2. Open http://localhost:8000 in your browser
+
+## Configuration
+
+- `FLASK_SECRET_KEY`: set a secret key for sessions (recommended).
+- `FLASK_DEBUG`: set to `1` to enable debug mode.
+- `PORT`: change the port (default `8000`).
+
+## Output Notes
+
+- Single-file conversions output `output/<name>/<name>.html`.
+- Quarto conversions keep `index.html` for the site and also copy it to `<name>.html` in the same folder.
 
 ## Accessibility Features
 

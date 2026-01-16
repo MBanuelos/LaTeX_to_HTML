@@ -30,7 +30,10 @@ if [ ! -d "venv" ]; then
 fi
 
 source venv/bin/activate
-pip install -r requirements.txt
+if ! pip install -r requirements.txt; then
+    echo "Error: Failed to install Python dependencies."
+    exit 1
+fi
 
 # Create necessary directories
 mkdir -p uploads output
