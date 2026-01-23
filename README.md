@@ -18,6 +18,7 @@ A web application that converts LaTeX documents to accessible HTML using Quarto 
 - Python 3.7+
 - Quarto (for multi-page site conversion)
 - Flask
+- Poppler (for TikZ PNG rendering via `pdftoppm`)
 
 ## Installation
 
