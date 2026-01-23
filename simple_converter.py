@@ -7,6 +7,7 @@ import re
 import os
 import subprocess
 import tempfile
+import shutil
 
 def preprocess_latex_simple(content):
     """Simple but effective LaTeX preprocessing"""
@@ -50,11 +51,20 @@ def preprocess_latex_simple(content):
         lines.append(r'\end{center}')
         return '\n'.join(lines)
 
+    def convert_framebox_parbox(text):
+        pattern = re.compile(
+            r'\\framebox\{\\parbox\{[^}]*\}\{([\s\S]*?)\}\}',
+            re.MULTILINE
+        )
+        return pattern.sub(r'\\begin{quote}\n\1\n\\end{quote}', text)
+
     def split_comment(line):
         match = re.search(r'(?<!\\)%', line)
         if match:
             return line[:match.start()], line[match.start():]
         return line, ''
+
+    content = convert_framebox_parbox(content)
 
     title, author, date = extract_title_info(content)
     title_block = build_title_block(title, author, date)
@@ -71,6 +81,8 @@ def preprocess_latex_simple(content):
     updated_lines = []
     for line in lines:
         code, comment = split_comment(line)
+        code = re.sub(r'\\begin\{multicols\}\{[^}]+\}', '', code)
+        code = re.sub(r'\\end\{multicols\}', '', code)
         for env_name, display_name in theorem_envs.items():
             begin_pattern = rf'\\begin\{{{env_name}\}}(?:\[(?P<title>[^\]]+)\])?'
             end_pattern = rf'\\end\{{{env_name}\}}'
@@ -91,6 +103,133 @@ def preprocess_latex_simple(content):
 
     return content
 
+def preprocess_tikz(content, work_dir):
+    """Render TikZ pictures to PNG and replace them with includegraphics."""
+    if shutil.which('pdflatex') is None or shutil.which('pdftoppm') is None:
+        raise Exception("TikZ detected but pdflatex or pdftoppm is not installed. Install TeX Live and Poppler (pdftoppm).")
+
+    if r'\usepackage{graphicx}' not in content:
+        if r'\documentclass' in content:
+            content = re.sub(
+                r'(\\documentclass[^\n]*\n)',
+                r'\1\\usepackage{graphicx}\n',
+                content,
+                count=1
+            )
+        else:
+            content = '\\usepackage{graphicx}\n' + content
+
+    tikz_pattern = re.compile(
+        r'\\begin\{tikzpicture\}[\s\S]*?\\end\{tikzpicture\}',
+        re.MULTILINE
+    )
+    matches = list(tikz_pattern.finditer(content))
+    if not matches:
+        return content, []
+    png_paths = []
+    new_parts = []
+    last_idx = 0
+
+    with tempfile.TemporaryDirectory(dir=work_dir) as temp_dir:
+        for idx, match in enumerate(matches, start=1):
+            tikz_block = match.group(0)
+            tex_name = f"tikz_{idx}.tex"
+            pdf_name = f"tikz_{idx}.pdf"
+            png_base = f"tikz_{idx}"
+            png_name = f"{png_base}.png"
+            tex_path = os.path.join(temp_dir, tex_name)
+
+            tex_content = (
+                "\\documentclass[tikz]{standalone}\n"
+                "\\usepackage{tikz}\n"
+                "\\begin{document}\n"
+                f"{tikz_block}\n"
+                "\\end{document}\n"
+            )
+            with open(tex_path, 'w', encoding='utf-8') as f:
+                f.write(tex_content)
+
+            pdflatex_cmd = [
+                'pdflatex',
+                '-interaction=nonstopmode',
+                '-halt-on-error',
+                '-output-directory', temp_dir,
+                tex_path
+            ]
+            result = subprocess.run(pdflatex_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"Warning: TikZ render failed for block {idx}: {result.stderr}")
+                continue
+
+            pdf_path = os.path.join(temp_dir, pdf_name)
+            ppm_cmd = [
+                'pdftoppm',
+                '-png',
+                '-singlefile',
+                pdf_path,
+                os.path.join(temp_dir, png_base)
+            ]
+            result = subprocess.run(ppm_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"Warning: pdftoppm failed for block {idx}: {result.stderr}")
+                continue
+
+            png_path = os.path.join(temp_dir, png_name)
+            final_png = os.path.join(work_dir, png_name)
+            shutil.copy2(png_path, final_png)
+            png_paths.append(final_png)
+
+            new_parts.append(content[last_idx:match.start()])
+            new_parts.append(f"\\begin{{center}}\\includegraphics{{{png_name}}}\\end{{center}}")
+            last_idx = match.end()
+
+        new_parts.append(content[last_idx:])
+
+    return ''.join(new_parts), png_paths
+
+def preprocess_beamer_frames(content):
+    """Convert beamer frames to section headings for reveal.js output"""
+    def split_comment(line):
+        match = re.search(r'(?<!\\)%', line)
+        if match:
+            return line[:match.start()], line[match.start():]
+        return line, ''
+
+    inside_frame = False
+    frame_title_set = False
+    output_lines = []
+
+    for line in content.split('\n'):
+        code, comment = split_comment(line)
+
+        begin_match = re.search(r'\\begin\{frame\}(?:\[[^\]]*\])?(?:\{([^}]*)\})?', code)
+        if begin_match:
+            inside_frame = True
+            frame_title_set = False
+            title = begin_match.group(1) or ''
+            if title.strip():
+                output_lines.append(f'\\section{{{title.strip()}}}')
+                frame_title_set = True
+            code = re.sub(r'\\begin\{frame\}(?:\[[^\]]*\])?(?:\{[^}]*\})?', '', code)
+
+        if inside_frame:
+            title_match = re.search(r'\\frametitle\{([^}]*)\}', code)
+            if title_match:
+                title = title_match.group(1).strip()
+                if title and not frame_title_set:
+                    output_lines.append(f'\\section{{{title}}}')
+                    frame_title_set = True
+                code = re.sub(r'\\frametitle\{[^}]*\}', '', code)
+
+        if r'\end{frame}' in code:
+            code = code.replace(r'\end{frame}', '')
+            inside_frame = False
+            frame_title_set = False
+
+        output_lines.append((code + comment).strip())
+
+    return '\n'.join([line for line in output_lines if line])
+
 def convert_latex_simple(input_file, output_file):
     """Convert LaTeX to HTML with preprocessing"""
     
@@ -100,7 +239,13 @@ def convert_latex_simple(input_file, output_file):
             content = f.read()
         
         # Preprocess
-        processed_content = preprocess_latex_simple(content)
+        is_beamer = bool(re.search(r'\\documentclass(?:\[[^\]]*\])?\{beamer\}', content))
+        if is_beamer:
+            processed_content = preprocess_beamer_frames(content)
+        else:
+            processed_content = content
+        processed_content, tikz_imgs = preprocess_tikz(processed_content, os.path.dirname(output_file) or '.')
+        processed_content = preprocess_latex_simple(processed_content)
         
         # Write to temporary file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.tex', delete=False) as temp_file:
@@ -112,11 +257,14 @@ def convert_latex_simple(input_file, output_file):
             cmd = [
                 'pandoc', temp_path,
                 '--from=latex',
-                '--to=html5',
+                '--to=' + ('revealjs' if is_beamer else 'html5'),
                 '--standalone',
                 '--mathjax',
+                '--resource-path=' + (os.path.dirname(output_file) or '.'),
                 '--output=' + output_file
             ]
+            if is_beamer:
+                cmd.extend(['--variable', 'revealjs-url=https://unpkg.com/reveal.js@5'])
             
             result = subprocess.run(cmd, capture_output=True, text=True)
             
@@ -124,7 +272,13 @@ def convert_latex_simple(input_file, output_file):
                 raise Exception(f"Pandoc failed: {result.stderr}")
             
             # Post-process HTML for better theorem styling
-            post_process_html(output_file)
+            if not is_beamer:
+                post_process_html(output_file)
+            for img_path in tikz_imgs:
+                img_name = os.path.basename(img_path)
+                dst = os.path.join(os.path.dirname(output_file), img_name)
+                if dst and os.path.abspath(img_path) != os.path.abspath(dst):
+                    shutil.copy2(img_path, dst)
             
             return True
             
@@ -168,6 +322,15 @@ body {
 
 .theorem-block > p:last-child {
     margin-bottom: 0;
+}
+
+/* Framebox-like quotes */
+blockquote:not(.theorem-block) {
+    margin: 1.2em 0;
+    padding: 1em;
+    border: 1px solid #ddd;
+    background-color: #f8f9fa;
+    border-radius: 4px;
 }
 
 /* Specific colors for different types */

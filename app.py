@@ -21,6 +21,12 @@ os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def tikz_tools_available():
+    return shutil.which('pdflatex') is not None and shutil.which('pdftoppm') is not None
+
+def has_tikz(content):
+    return bool(re.search(r'\\begin\{tikzpicture\}', content))
+
 def extract_title_info(content):
     title_match = re.search(r'\\title\{([^}]*)\}', content)
     author_match = re.search(r'\\author\{([^}]*)\}', content)
@@ -66,11 +72,20 @@ def preprocess_latex(latex_content):
     title, author, date = extract_title_info(latex_content)
     title_block = build_title_block(title, author, date)
 
+    def convert_framebox_parbox(text):
+        pattern = re.compile(
+            r'\\framebox\{\\parbox\{[^}]*\}\{([\s\S]*?)\}\}',
+            re.MULTILINE
+        )
+        return pattern.sub(r'\\begin{quote}\n\1\n\\end{quote}', text)
+
     def split_comment(line):
         match = re.search(r'(?<!\\)%', line)
         if match:
             return line[:match.start()], line[match.start():]
         return line, ''
+
+    latex_content = convert_framebox_parbox(latex_content)
 
     if title_block:
         if r'\maketitle' in latex_content:
@@ -85,6 +100,8 @@ def preprocess_latex(latex_content):
     updated_lines = []
     for line in lines:
         code, comment = split_comment(line)
+        code = re.sub(r'\\begin\{multicols\}\{[^}]+\}', '', code)
+        code = re.sub(r'\\end\{multicols\}', '', code)
         for env_name, display_name in theorem_envs.items():
             begin_pattern = rf'\\begin\{{{env_name}\}}(?:\[(?P<title>[^\]]+)\])?'
             end_pattern = rf'\\end\{{{env_name}\}}'
@@ -104,6 +121,135 @@ def preprocess_latex(latex_content):
     latex_content = re.sub(r'\\ref\{([^}]+)\}', r'\\textit{\1}', latex_content)  # Convert refs to italic
 
     return latex_content
+
+def preprocess_tikz(latex_content, work_dir, output_dir):
+    """Render TikZ pictures to PNG and replace them with includegraphics."""
+    if not tikz_tools_available():
+        print("Warning: TikZ detected but pdflatex or pdftoppm is not installed; skipping TikZ blocks.")
+        return latex_content, []
+
+    if r'\usepackage{graphicx}' not in latex_content:
+        if r'\documentclass' in latex_content:
+            latex_content = re.sub(
+                r'(\\documentclass[^\n]*\n)',
+                r'\1\\usepackage{graphicx}\n',
+                latex_content,
+                count=1
+            )
+        else:
+            latex_content = '\\usepackage{graphicx}\n' + latex_content
+
+    tikz_pattern = re.compile(
+        r'\\begin\{tikzpicture\}[\s\S]*?\\end\{tikzpicture\}',
+        re.MULTILINE
+    )
+    matches = list(tikz_pattern.finditer(latex_content))
+    if not matches:
+        return latex_content, []
+
+    png_paths = []
+    new_parts = []
+    last_idx = 0
+
+    with tempfile.TemporaryDirectory(dir=work_dir) as temp_dir:
+        for idx, match in enumerate(matches, start=1):
+            tikz_block = match.group(0)
+            tex_name = f"tikz_{idx}.tex"
+            pdf_name = f"tikz_{idx}.pdf"
+            png_base = f"tikz_{idx}"
+            png_name = f"{png_base}.png"
+            tex_path = os.path.join(temp_dir, tex_name)
+
+            tex_content = (
+                "\\documentclass[tikz]{standalone}\n"
+                "\\usepackage{tikz}\n"
+                "\\begin{document}\n"
+                f"{tikz_block}\n"
+                "\\end{document}\n"
+            )
+            with open(tex_path, 'w', encoding='utf-8') as f:
+                f.write(tex_content)
+
+            pdflatex_cmd = [
+                'pdflatex',
+                '-interaction=nonstopmode',
+                '-halt-on-error',
+                '-output-directory', temp_dir,
+                tex_path
+            ]
+            result = subprocess.run(pdflatex_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"Warning: TikZ render failed for block {idx}: {result.stderr}")
+                continue
+
+            pdf_path = os.path.join(temp_dir, pdf_name)
+            ppm_cmd = [
+                'pdftoppm',
+                '-png',
+                '-singlefile',
+                pdf_path,
+                os.path.join(temp_dir, png_base)
+            ]
+            result = subprocess.run(ppm_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"Warning: pdftoppm failed for block {idx}: {result.stderr}")
+                continue
+
+            png_path = os.path.join(temp_dir, png_name)
+            final_png = os.path.join(work_dir, png_name)
+            shutil.copy2(png_path, final_png)
+            png_paths.append(final_png)
+
+            new_parts.append(latex_content[last_idx:match.start()])
+            new_parts.append(f"\\begin{{center}}\\includegraphics{{{png_name}}}\\end{{center}}")
+            last_idx = match.end()
+
+        new_parts.append(latex_content[last_idx:])
+
+    return ''.join(new_parts), png_paths
+
+def preprocess_beamer_frames(latex_content):
+    """Convert beamer frames to section headings for reveal.js output"""
+    def split_comment(line):
+        match = re.search(r'(?<!\\)%', line)
+        if match:
+            return line[:match.start()], line[match.start():]
+        return line, ''
+
+    inside_frame = False
+    frame_title_set = False
+    output_lines = []
+
+    for line in latex_content.split('\n'):
+        code, comment = split_comment(line)
+
+        begin_match = re.search(r'\\begin\{frame\}(?:\[[^\]]*\])?(?:\{([^}]*)\})?', code)
+        if begin_match:
+            inside_frame = True
+            frame_title_set = False
+            title = begin_match.group(1) or ''
+            if title.strip():
+                output_lines.append(f'\\section{{{title.strip()}}}')
+                frame_title_set = True
+            code = re.sub(r'\\begin\{frame\}(?:\[[^\]]*\])?(?:\{[^}]*\})?', '', code)
+
+        if inside_frame:
+            title_match = re.search(r'\\frametitle\{([^}]*)\}', code)
+            if title_match:
+                title = title_match.group(1).strip()
+                if title and not frame_title_set:
+                    output_lines.append(f'\\section{{{title}}}')
+                    frame_title_set = True
+                code = re.sub(r'\\frametitle\{[^}]*\}', '', code)
+
+        if r'\end{frame}' in code:
+            code = code.replace(r'\end{frame}', '')
+            inside_frame = False
+            frame_title_set = False
+
+        output_lines.append((code + comment).strip())
+
+    return '\n'.join([line for line in output_lines if line])
 
 def resolve_includes(latex_content, base_dir):
     """Resolve \\include and \\input commands"""
@@ -146,6 +292,7 @@ def create_quarto_website(latex_file_path, output_dir):
         latex_content = f.read()
     
     resolved_content = resolve_includes(latex_content, work_dir)
+    resolved_content, tikz_imgs = preprocess_tikz(resolved_content, work_dir, output_dir)
     processed_content = preprocess_latex(resolved_content)
     title, _, _ = extract_title_info(resolved_content)
     site_title = title if title else "LaTeX Document"
@@ -226,6 +373,11 @@ nav#TOC { margin-left: 1rem; }
             else:
                 shutil.copy2(src, dst)
 
+        for img_path in tikz_imgs:
+            img_name = os.path.basename(img_path)
+            if not os.path.exists(os.path.join(output_dir, img_name)):
+                shutil.copy2(img_path, os.path.join(output_dir, img_name))
+
         index_path = os.path.join(output_dir, 'index.html')
         base_name = os.path.splitext(os.path.basename(latex_file_path))[0]
         named_path = os.path.join(output_dir, f"{base_name}.html")
@@ -265,7 +417,7 @@ def convert_latex_to_html(latex_file_path, output_path):
         if validation_errors:
             print(f"Warning: LaTeX validation issues found: {'; '.join(validation_errors)}")
         
-        def convert_with_pandoc(processed_content):
+        def convert_with_pandoc(processed_content, output_format='html5'):
             temp_tex = os.path.join(work_dir, 'temp_processed.tex')
             with open(temp_tex, 'w', encoding='utf-8') as f:
                 f.write(processed_content)
@@ -273,11 +425,16 @@ def convert_latex_to_html(latex_file_path, output_path):
             pandoc_cmd = [
                 'pandoc', temp_tex,
                 '--from=latex',
-                '--to=html5',
+                '--to=' + output_format,
                 '--standalone',
                 '--mathjax',
+                '--resource-path=' + work_dir,
                 '--output=' + output_path
             ]
+            if output_format == 'revealjs':
+                pandoc_cmd.extend([
+                    '--variable', 'revealjs-url=https://unpkg.com/reveal.js@5'
+                ])
 
             result = subprocess.run(pandoc_cmd, capture_output=True, text=True)
 
@@ -288,20 +445,48 @@ def convert_latex_to_html(latex_file_path, output_path):
             if os.path.exists(temp_tex):
                 os.remove(temp_tex)
 
-            enhance_html_accessibility(output_path)
+            if output_format != 'revealjs':
+                enhance_html_accessibility(output_path)
             return True
 
+        is_beamer = bool(re.search(r'\\documentclass(?:\[[^\]]*\])?\{beamer\}', content))
+
+        if is_beamer:
+            processed_content = preprocess_beamer_frames(content)
+            processed_content = preprocess_latex(processed_content)
+            return convert_with_pandoc(processed_content, output_format='revealjs')
+        tikz_imgs = []
         if re.search(r'\\(?:include|input|chapter|section)\{[^}]+\}', content):
             try:
                 return create_quarto_website(latex_file_path, output_dir)
             except Exception as e:
                 print(f"Warning: Quarto render failed, falling back to single HTML: {e}")
                 resolved_content = resolve_includes(content, work_dir)
-                processed_content = preprocess_latex(resolved_content)
-                return convert_with_pandoc(processed_content)
+                resolved_content, tikz_imgs = preprocess_tikz(resolved_content, work_dir, output_dir)
+                if is_beamer:
+                    processed_content = preprocess_beamer_frames(resolved_content)
+                else:
+                    processed_content = resolved_content
+                processed_content = preprocess_latex(processed_content)
+                output_format = 'revealjs' if is_beamer else 'html5'
+                result = convert_with_pandoc(processed_content, output_format=output_format)
+                for img_path in tikz_imgs:
+                    img_name = os.path.basename(img_path)
+                    shutil.copy2(img_path, os.path.join(output_dir, img_name))
+                return result
         else:
-            processed_content = preprocess_latex(content)
-            return convert_with_pandoc(processed_content)
+            if is_beamer:
+                processed_content = preprocess_beamer_frames(content)
+            else:
+                processed_content = content
+            processed_content, tikz_imgs = preprocess_tikz(processed_content, work_dir, output_dir)
+            processed_content = preprocess_latex(processed_content)
+            output_format = 'revealjs' if is_beamer else 'html5'
+            result = convert_with_pandoc(processed_content, output_format=output_format)
+            for img_path in tikz_imgs:
+                img_name = os.path.basename(img_path)
+                shutil.copy2(img_path, os.path.join(output_dir, img_name))
+            return result
             
     except FileNotFoundError as e:
         raise Exception(f"File error: {str(e)}")
@@ -417,6 +602,15 @@ p[data-theorem] {
     margin-bottom: 0;
 }
 
+/* Framebox-like quotes */
+blockquote:not(.theorem-block) {
+    margin: 1.2em 0;
+    padding: 1em;
+    border: 1px solid #ddd;
+    background-color: #f8f9fa;
+    border-radius: 4px;
+}
+
 /* Specific styling based on content */
 p[data-theorem="definition"],
 .theorem-block[data-theorem="definition"] {
@@ -475,18 +669,36 @@ def index():
 @app.route('/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
-        flash('No file selected')
+        flash('No file selected', 'error')
         return redirect(request.url)
     
     file = request.files['file']
     if file.filename == '':
-        flash('No file selected')
+        flash('No file selected', 'error')
         return redirect(request.url)
     
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         file.save(filepath)
+
+        if not tikz_tools_available():
+            try:
+                if filename.lower().endswith('.zip'):
+                    with zipfile.ZipFile(filepath, 'r') as zip_ref:
+                        for member in zip_ref.namelist():
+                            if member.lower().endswith(('.tex', '.latex')):
+                                content = zip_ref.read(member).decode('utf-8', errors='ignore')
+                                if has_tikz(content):
+                                    flash('TikZ detected but pdflatex/pdftoppm not installed; TikZ graphics will be skipped.', 'warning')
+                                    break
+                else:
+                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    if has_tikz(content):
+                        flash('TikZ detected but pdflatex/pdftoppm not installed; TikZ graphics will be skipped.', 'warning')
+            except Exception:
+                pass
         
         try:
             if filename.lower().endswith('.zip'):
@@ -497,10 +709,10 @@ def upload_file():
                 output_dir = process_single_latex_file(filepath)
             return render_template('success.html', output_dir=output_dir)
         except Exception as e:
-            flash(f'Error processing file: {str(e)}')
+            flash(f'Error processing file: {str(e)}', 'error')
             return redirect(url_for('index'))
     
-    flash('Invalid file type. Please upload a ZIP, TEX, or LATEX file.')
+    flash('Invalid file type. Please upload a ZIP, TEX, or LATEX file.', 'error')
     return redirect(url_for('index'))
 
 def process_latex_zip(zip_path):
